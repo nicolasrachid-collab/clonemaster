@@ -1,0 +1,51 @@
+========================================
+  COMO EXECUTAR O PROJETO
+========================================
+
+OPCAO 1 - MAIS FACIL (RECOMENDADO):
+1. Navegue ate a pasta do projeto no Windows Explorer
+2. Dê duplo clique no arquivo "start.bat"
+3. Uma janela do terminal vai abrir com o servidor
+4. Acesse no navegador: http://localhost:8000
+
+OPCAO 2 - PELO TERMINAL:
+1. Abra o PowerShell ou CMD
+2. Navegue ate a pasta do projeto:
+   cd "C:\Users\Nicolas Rachid\Documents\Prontuário Eletrônico - Sistema Brainn"
+3. Execute: start.bat
+   OU
+   php -S localhost:8000 -t public
+
+OPCAO 3 - PELO POWERSHELL:
+1. Abra o PowerShell na pasta do projeto
+2. Execute: .\start.ps1
+   OU
+   php -S localhost:8000 -t public
+
+========================================
+  SOLUCAO DE PROBLEMAS
+========================================
+
+Se aparecer "PHP nao encontrado":
+- Feche e reabra o terminal
+- Ou reinicie o computador
+- O PHP ja foi instalado, mas pode precisar recarregar o PATH
+
+Se a porta 8000 estiver ocupada:
+- Use outra porta: php -S localhost:8080 -t public
+- Ou feche o programa que esta usando a porta 8000
+
+Se nao abrir no navegador:
+- Verifique se o servidor esta rodando (veja a janela do terminal)
+- Tente acessar: http://127.0.0.1:8000
+- Verifique se nao ha firewall bloqueando
+
+========================================
+  IMPORTANTE
+========================================
+
+- O servidor deve estar rodando em uma janela de terminal
+- NAO feche a janela do terminal enquanto usar o sistema
+- Para parar o servidor, pressione Ctrl+C na janela do terminal
+- Ou simplesmente feche a janela do terminal
+
