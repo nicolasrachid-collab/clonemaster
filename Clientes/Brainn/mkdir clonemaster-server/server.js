@@ -30,14 +30,9 @@ app.use(express.json());
 // Servir arquivos estáticos da pasta public
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Rota básica (mantida para compatibilidade)
+// Rota básica - servir a interface web
 app.get('/', (req, res) => {
-  res.json({ 
-    message: 'Clonemaster Server está rodando!',
-    status: 'online',
-    endpoint: 'POST /api/render',
-    timestamp: new Date().toISOString()
-  });
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 // --- ROBOT LOGIC ---
@@ -361,6 +356,32 @@ async function downloadAllAssets(page, baseUrl, cloneDir) {
   
   console.log('[DOWNLOAD] Extraindo assets da página...');
   
+  // Scroll completo ANTES de extrair para garantir lazy images
+  console.log('[DOWNLOAD] Fazendo scroll completo para carregar lazy images...');
+  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  await new Promise(r => setTimeout(r, 3000));
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await new Promise(r => setTimeout(r, 2000));
+  
+  // Forçar carregamento de todas as imagens antes de extrair
+  await page.evaluate(() => {
+    document.querySelectorAll('img').forEach(img => {
+      if (img.dataset.src && !img.src) {
+        img.src = img.dataset.src;
+        img.removeAttribute('data-src');
+      }
+      if (img.loading === 'lazy') {
+        img.loading = 'eager';
+        img.removeAttribute('loading');
+      }
+      if (img.dataset.lazySrc) {
+        img.src = img.dataset.lazySrc;
+      }
+    });
+  });
+  
+  await new Promise(r => setTimeout(r, 2000));
+  
   // Extrair todos os assets
   const assets = await page.evaluate(() => {
     const result = {
@@ -404,26 +425,8 @@ async function downloadAllAssets(page, baseUrl, cloneDir) {
       if (link.href) result.js.push(link.href);
     });
     
-    // Imagens - FORÇAR todas a aparecer primeiro
-    // Scroll para carregar lazy images
-    window.scrollTo(0, document.body.scrollHeight);
-    await new Promise(r => setTimeout(r, 500));
-    window.scrollTo(0, 0);
-    await new Promise(r => setTimeout(r, 500));
-    
-    // Aguardar React renderizar novas imagens
-    await new Promise(r => setTimeout(r, 1000));
-    
-    // Agora capturar todas as imagens
+    // Imagens - capturar todas, incluindo as que foram forçadas a carregar
     document.querySelectorAll('img').forEach(img => {
-      // Forçar carregamento de imagens lazy
-      if (img.dataset.src && !img.src) {
-        img.src = img.dataset.src;
-      }
-      // Forçar carregamento se tiver src vazio mas data-src
-      if (!img.src && img.dataset.src) {
-        img.src = img.dataset.src;
-      }
       // Capturar src atual (mesmo que ainda não tenha carregado)
       if (img.src && !img.src.startsWith('data:') && !img.src.startsWith('blob:')) {
         result.images.push(img.src);
@@ -1241,214 +1244,389 @@ app.post('/api/clone-and-zip', async (req, res) => {
     });
 
     await robustNavigate(page, url);
-    
-    // Aguardar React/Framer carregar e começar a renderizar
-    console.log('[AUTO-CLONE] Aguardando React/Framer carregar...');
-    await new Promise(r => setTimeout(r, 3000));
-    
-    // Aguardar que o React termine de renderizar (verificar se há elementos renderizados)
-    console.log('[AUTO-CLONE] Aguardando renderização do React...');
-    try {
-      await page.waitForFunction(() => {
-        // Verificar se há conteúdo renderizado (não apenas o body vazio)
-        const body = document.body;
-        if (!body) return false;
-        
-        // Verificar se há elementos filhos significativos
-        const children = body.children;
-        if (children.length === 0) return false;
-        
-        // Verificar se há imagens ou elementos com conteúdo
-        const hasImages = document.querySelectorAll('img').length > 0;
-        const hasContent = body.innerText.trim().length > 100;
-        const hasVisibleElements = Array.from(body.querySelectorAll('*')).some(el => {
-          const style = window.getComputedStyle(el);
-          return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
-        });
-        
-        return hasImages || hasContent || hasVisibleElements;
-      }, { timeout: 20000 });
-    } catch (e) {
-      console.log('[AUTO-CLONE] Timeout aguardando React, continuando...');
-    }
-    
-    await page.mouse.move(100, 100);
-    await page.mouse.move(200, 200);
-    
-    // Aguardar elementos críticos aparecerem (produtos, imagens, cards)
-    console.log('[AUTO-CLONE] Aguardando elementos críticos...');
-    try {
-      // Aguardar múltiplos tipos de elementos
-      await Promise.race([
-        page.waitForSelector('img[src]:not([src=""])', { timeout: 10000 }),
-        page.waitForSelector('[class*="product"]', { timeout: 10000 }),
-        page.waitForSelector('[class*="card"]', { timeout: 10000 }),
-        page.waitForSelector('[class*="hero"]', { timeout: 10000 }),
-        page.waitForSelector('main, section, article', { timeout: 10000 })
-      ]);
-    } catch (e) {
-      console.log('[AUTO-CLONE] Alguns elementos podem não ter aparecido, continuando...');
-    }
-    
-    await smartScroll(page);
-    
-    // Aguardar network estar idle
-    console.log('[AUTO-CLONE] Aguardando network idle...');
-    try {
-      // Monitorar requisições de rede
-      let networkIdle = false;
-      let pendingRequests = 0;
-      
-      page.on('request', () => {
-        pendingRequests++;
-        networkIdle = false;
-      });
-      
-      page.on('response', () => {
-        pendingRequests--;
-        if (pendingRequests <= 0) {
-          setTimeout(() => {
-            if (pendingRequests <= 0) {
-              networkIdle = true;
-            }
-          }, 1000);
-        }
-      });
-      
-      // Aguardar network idle (sem requisições por 2 segundos)
-      await page.evaluate(() => {
-        return new Promise((resolve) => {
-          let idleCount = 0;
-          const checkIdle = () => {
-            if (document.readyState === 'complete') {
-              idleCount++;
-              if (idleCount >= 4) { // 2 segundos (4 x 500ms)
-                resolve();
-              } else {
-                setTimeout(checkIdle, 500);
-              }
-            } else {
-              idleCount = 0;
-              setTimeout(checkIdle, 500);
-            }
-          };
-          checkIdle();
-        });
-      });
-    } catch (e) {
-      console.log('[AUTO-CLONE] Network idle check falhou, aguardando tempo fixo...');
-    }
-    
-    // Aguardar renderização do React estabilizar (elementos não mudam mais)
-    console.log('[AUTO-CLONE] Aguardando renderização final do React...');
-    try {
-      await page.waitForFunction(() => {
-        return new Promise((resolve) => {
-          let lastElementCount = document.querySelectorAll('*').length;
-          let stableCount = 0;
-          
-          const checkStable = () => {
-            const currentCount = document.querySelectorAll('*').length;
-            if (currentCount === lastElementCount) {
-              stableCount++;
-              if (stableCount >= 6) { // Estável por 3 segundos (6 x 500ms)
-                resolve(true);
-                return;
-              }
-            } else {
-              stableCount = 0;
-              lastElementCount = currentCount;
-            }
-            setTimeout(checkStable, 500);
-          };
-          
-          checkStable();
-          
-          // Timeout após 10 segundos
-          setTimeout(() => resolve(true), 10000);
-        });
-      }, { timeout: 15000 });
-    } catch (e) {
-      console.log('[AUTO-CLONE] Verificação de estabilidade falhou, aguardando tempo fixo...');
-    }
-    
-    // Aguardar mais um pouco para garantir
-    await new Promise(r => setTimeout(r, 3000));
-    
-    // Forçar carregamento de todas as imagens lazy-load
-    await page.evaluate(() => {
-      // Carregar todas as imagens lazy
-      const imgs = document.querySelectorAll('img[loading="lazy"], img[data-src]');
-      imgs.forEach(img => {
-        if (img.dataset.src) {
-          img.src = img.dataset.src;
-          img.removeAttribute('loading');
-        } else if (img.loading === 'lazy') {
-          img.loading = 'eager';
-        }
-      });
-      
-      // Forçar renderização de elementos com background-image
-      const elementsWithBg = document.querySelectorAll('[style*="background-image"]');
-      elementsWithBg.forEach(el => {
-        const bg = window.getComputedStyle(el).backgroundImage;
-        if (bg && bg !== 'none') {
-          // Forçar repaint
-          el.style.display = 'none';
-          el.offsetHeight; // Trigger reflow
-          el.style.display = '';
-        }
-      });
+
+    // ========== ETAPA 1: Aguardar React/Framer carregar ==========
+    console.log('[AUTO-CLONE] [1/8] Aguardando React/Framer carregar...');
+    await new Promise(r => setTimeout(r, 5000)); // Aumentado para 5 segundos
+
+    // Verificar se React carregou
+    const reactLoaded = await page.evaluate(() => {
+      return typeof window.React !== 'undefined' || 
+             document.querySelector('[data-reactroot]') !== null ||
+             document.querySelector('*[class*="framer"]') !== null;
     });
-    
-    // Aguardar mais um pouco após forçar carregamento
-    await new Promise(r => setTimeout(r, 2000));
-    
-    // FORÇAR renderização completa do React e aguardar todas as imagens carregarem
-    console.log('[AUTO-CLONE] Forçando renderização completa e aguardando imagens...');
-    await page.evaluate(async () => {
-      // Forçar todas as imagens a carregar
-      const allImages = [];
-      
-      // Coletar todas as imagens (incluindo as que ainda não foram renderizadas)
-      const imgElements = document.querySelectorAll('img');
-      imgElements.forEach(img => {
-        if (img.dataset.src) {
-          img.src = img.dataset.src;
-        }
-        if (img.src && !img.src.startsWith('data:')) {
-          allImages.push(img.src);
-        }
-      });
-      
-      // Aguardar todas as imagens carregarem
-      const imagePromises = Array.from(imgElements).map(img => {
-        return new Promise((resolve) => {
-          if (img.complete) {
-            resolve();
-          } else {
-            img.onload = () => resolve();
-            img.onerror = () => resolve(); // Continuar mesmo se falhar
-            // Timeout após 5 segundos
-            setTimeout(() => resolve(), 5000);
-          }
-        });
-      });
-      
-      await Promise.all(imagePromises);
-      
-      // Forçar scroll para carregar lazy images
-      window.scrollTo(0, document.body.scrollHeight);
-      await new Promise(r => setTimeout(r, 1000));
-      window.scrollTo(0, 0);
+
+    if (!reactLoaded) {
+      console.warn('[AUTO-CLONE] ⚠️ React pode não ter carregado, aguardando mais...');
+      await new Promise(r => setTimeout(r, 5000));
+    }
+
+    // ========== ETAPA 2: Aguardar renderização inicial do React ==========
+    console.log('[AUTO-CLONE] [2/8] Aguardando renderização inicial do React...');
+    let reactRendered = false;
+    let attempts = 0;
+    const maxAttempts = 10;
+
+    while (!reactRendered && attempts < maxAttempts) {
+      attempts++;
+      try {
+        await page.waitForFunction(() => {
+          const body = document.body;
+          if (!body) return false;
+          
+          const children = body.children;
+          if (children.length === 0) return false;
+          
+          const hasImages = document.querySelectorAll('img').length > 0;
+          const hasContent = body.innerText.trim().length > 100;
+          const hasVisibleElements = Array.from(body.querySelectorAll('*')).some(el => {
+            const style = window.getComputedStyle(el);
+            return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+          });
+          
+          return hasImages || hasContent || hasVisibleElements;
+        }, { timeout: 5000 });
+        
+        reactRendered = true;
+        console.log(`[AUTO-CLONE] ✅ React renderizado (tentativa ${attempts})`);
+      } catch (e) {
+        console.log(`[AUTO-CLONE] Tentativa ${attempts}/${maxAttempts} - Aguardando mais...`);
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    }
+
+    if (!reactRendered) {
+      throw new Error('Falha ao aguardar renderização inicial do React após 10 tentativas');
+    }
+
+    // ========== ETAPA 3: Simular interação humana ==========
+    console.log('[AUTO-CLONE] [3/8] Simulando interação humana...');
+    await page.mouse.move(100, 100);
+    await new Promise(r => setTimeout(r, 500));
+    await page.mouse.move(200, 200);
+    await new Promise(r => setTimeout(r, 500));
+    await page.mouse.down();
+    await page.mouse.up();
+    await new Promise(r => setTimeout(r, 500));
+
+    // ========== ETAPA 4: Aguardar elementos críticos ==========
+    console.log('[AUTO-CLONE] [4/8] Aguardando elementos críticos aparecerem...');
+    let criticalElementsFound = false;
+    attempts = 0;
+
+    while (!criticalElementsFound && attempts < 5) {
+      attempts++;
+      try {
+        await Promise.race([
+          page.waitForSelector('img[src]:not([src=""])', { timeout: 5000 }),
+          page.waitForSelector('[class*="product"]', { timeout: 5000 }),
+          page.waitForSelector('[class*="card"]', { timeout: 5000 }),
+          page.waitForSelector('[class*="hero"]', { timeout: 5000 }),
+          page.waitForSelector('main, section, article', { timeout: 5000 })
+        ]);
+        criticalElementsFound = true;
+        console.log(`[AUTO-CLONE] ✅ Elementos críticos encontrados (tentativa ${attempts})`);
+      } catch (e) {
+        console.log(`[AUTO-CLONE] Tentativa ${attempts}/5 - Aguardando elementos...`);
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    }
+
+    // ========== ETAPA 5: Scroll completo ==========
+    console.log('[AUTO-CLONE] [5/8] Fazendo scroll completo...');
+    await smartScroll(page);
+
+    // ========== ETAPA 6: Aguardar network idle ==========
+    console.log('[AUTO-CLONE] [6/8] Aguardando network idle...');
+    let networkIdle = false;
+    let pendingRequests = 0;
+    let idleStartTime = null;
+
+    page.on('request', () => {
+      pendingRequests++;
+      networkIdle = false;
+      idleStartTime = null;
+    });
+
+    page.on('response', () => {
+      pendingRequests--;
+      if (pendingRequests <= 0) {
+        idleStartTime = Date.now();
+      }
+    });
+
+    // Aguardar network idle por 3 segundos
+    const networkIdleStart = Date.now();
+    while (!networkIdle) {
       await new Promise(r => setTimeout(r, 500));
       
-      // Aguardar mais um pouco para React renderizar
-      await new Promise(r => setTimeout(r, 2000));
+      if (pendingRequests === 0 && idleStartTime) {
+        const idleDuration = Date.now() - idleStartTime;
+        if (idleDuration >= 3000) {
+          networkIdle = true;
+          console.log('[AUTO-CLONE] ✅ Network idle confirmado');
+        }
+      }
+      
+      // Verificar readyState também
+      const readyState = await page.evaluate(() => document.readyState);
+      if (readyState === 'complete' && pendingRequests === 0) {
+        if (!idleStartTime) idleStartTime = Date.now();
+      }
+      
+      // Timeout de segurança após 30 segundos
+      if (Date.now() - networkIdleStart > 30000) {
+        console.warn('[AUTO-CLONE] ⚠️ Timeout aguardando network idle, continuando...');
+        networkIdle = true;
+      }
+    }
+
+    // ========== ETAPA 7: Aguardar DOM estabilizar ==========
+    console.log('[AUTO-CLONE] [7/8] Aguardando DOM estabilizar...');
+    let domStable = false;
+    let lastHTMLSize = 0;
+    let stableCount = 0;
+
+    for (let i = 0; i < 30; i++) {
+      await new Promise(r => setTimeout(r, 500));
+      
+      const currentHTMLSize = await page.evaluate(() => document.body.innerHTML.length);
+      
+      if (currentHTMLSize === lastHTMLSize) {
+        stableCount++;
+        if (stableCount >= 8) { // Estável por 4 segundos
+          domStable = true;
+          console.log('[AUTO-CLONE] ✅ DOM estável confirmado');
+          break;
+        }
+      } else {
+        stableCount = 0;
+        lastHTMLSize = currentHTMLSize;
+      }
+    }
+
+    if (!domStable) {
+      console.warn('[AUTO-CLONE] ⚠️ DOM não estabilizou completamente, mas continuando...');
+    }
+
+    // ========== ETAPA 8: Forçar carregamento de todas as imagens ==========
+    console.log('[AUTO-CLONE] [8/8] Forçando carregamento de todas as imagens...');
+
+    // Scroll completo usando Puppeteer
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    await new Promise(r => setTimeout(r, 2000));
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await new Promise(r => setTimeout(r, 1000));
+
+    // Forçar todas as imagens a carregar
+    await page.evaluate(() => {
+      document.querySelectorAll('img').forEach(img => {
+        if (img.dataset.src) {
+          img.src = img.dataset.src;
+          img.removeAttribute('data-src');
+        }
+        if (img.loading === 'lazy') {
+          img.loading = 'eager';
+        }
+        if (img.dataset.lazySrc) {
+          img.src = img.dataset.lazySrc;
+        }
+      });
+    });
+
+    // Aguardar TODAS as imagens carregarem completamente
+    let allImagesLoaded = false;
+    attempts = 0;
+
+    while (!allImagesLoaded && attempts < 10) {
+      attempts++;
+      
+      const imagesStatus = await page.evaluate(async () => {
+        const images = Array.from(document.querySelectorAll('img'));
+        const status = {
+          total: images.length,
+          loaded: 0,
+          failed: 0,
+          pending: 0
+        };
+        
+        for (const img of images) {
+          if (!img.src || img.src.startsWith('data:') || img.src.startsWith('blob:')) {
+            continue;
+          }
+          
+          if (img.complete && img.naturalHeight > 0) {
+            status.loaded++;
+          } else if (img.complete && img.naturalHeight === 0) {
+            status.failed++;
+          } else {
+            status.pending++;
+          }
+        }
+        
+        return status;
+      });
+      
+      console.log(`[AUTO-CLONE] Imagens: ${imagesStatus.loaded}/${imagesStatus.total} carregadas, ${imagesStatus.pending} pendentes`);
+      
+      if (imagesStatus.pending === 0) {
+        allImagesLoaded = true;
+        console.log('[AUTO-CLONE] ✅ Todas as imagens carregadas');
+      } else {
+        // Aguardar imagens pendentes carregarem
+        await page.evaluate(() => {
+          return Promise.all(
+            Array.from(document.querySelectorAll('img'))
+              .filter(img => img.src && !img.src.startsWith('data:') && !img.src.startsWith('blob:'))
+              .filter(img => !img.complete || img.naturalHeight === 0)
+              .map(img => {
+                return new Promise((resolve) => {
+                  const timeout = setTimeout(() => resolve(), 10000);
+                  img.onload = () => {
+                    clearTimeout(timeout);
+                    resolve();
+                  };
+                  img.onerror = () => {
+                    clearTimeout(timeout);
+                    resolve();
+                  };
+                });
+              })
+          );
+        });
+        
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    }
+
+    // Scroll final para garantir lazy images
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    await new Promise(r => setTimeout(r, 3000));
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await new Promise(r => setTimeout(r, 2000));
+
+    // Verificação final obrigatória
+    console.log('[AUTO-CLONE] Verificação final do conteúdo...');
+    const finalCheck = await page.evaluate(() => {
+      const imgCount = document.querySelectorAll('img[src]:not([src=""])').length;
+      const textLength = document.body.innerText.trim().length;
+      const hasVisibleContent = document.body.scrollHeight > 500;
+      const hasStructure = document.querySelectorAll('main, section, article, div[class*="container"]').length > 0;
+      
+      return {
+        hasImages: imgCount > 0,
+        hasText: textLength > 100,
+        hasVisibleContent: hasVisibleContent,
+        hasStructure: hasStructure,
+        imgCount: imgCount,
+        textLength: textLength
+      };
+    });
+
+    console.log('[AUTO-CLONE] Verificação final:', finalCheck);
+
+    if (!finalCheck.hasImages && !finalCheck.hasText) {
+      throw new Error('Conteúdo não renderizado: nenhuma imagem ou texto encontrado');
+    }
+
+    if (!finalCheck.hasVisibleContent) {
+      throw new Error('Conteúdo não visível: altura da página muito pequena');
+    }
+
+    // Aguardar mais um pouco para garantir renderização completa
+    await new Promise(r => setTimeout(r, 5000));
+
+    // ========== ETAPA EXTRA: Forçar renderização de elementos ocultos ==========
+    console.log('[AUTO-CLONE] [EXTRA] Forçando renderização de elementos ocultos...');
+    
+    // Scroll completo mais uma vez para garantir lazy images
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    await new Promise(r => setTimeout(r, 3000));
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await new Promise(r => setTimeout(r, 2000));
+    
+    // Forçar visibilidade temporária de elementos ocultos para capturar imagens
+    // IMPORTANTE: Não aplicar em elementos estruturais (head, meta, title, etc.)
+    await page.evaluate(() => {
+      const structuralTags = ['HEAD', 'META', 'TITLE', 'LINK', 'SCRIPT', 'STYLE', 'NOSCRIPT'];
+      
+      document.querySelectorAll('*').forEach(el => {
+        // Ignorar elementos estruturais
+        if (structuralTags.includes(el.tagName)) {
+          return;
+        }
+        
+        const style = window.getComputedStyle(el);
+        // Apenas aplicar em elementos que REALMENTE estavam ocultos
+        if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) === 0) {
+          el.setAttribute('data-original-display', style.display || '');
+          el.setAttribute('data-original-visibility', style.visibility || '');
+          el.setAttribute('data-original-opacity', style.opacity || '');
+          el.style.display = 'block';
+          el.style.visibility = 'visible';
+          el.style.opacity = '1';
+        }
+      });
+      
+      // Forçar carregamento de TODAS as imagens
+      document.querySelectorAll('img').forEach(img => {
+        if (img.dataset.src && !img.src) {
+          img.src = img.dataset.src;
+          img.removeAttribute('data-src');
+        }
+        if (img.loading === 'lazy') {
+          img.loading = 'eager';
+          img.removeAttribute('loading');
+        }
+        if (img.dataset.lazySrc) {
+          img.src = img.dataset.lazySrc;
+        }
+      });
     });
     
-    // Aguardar mais tempo para garantir
+    await new Promise(r => setTimeout(r, 5000));
+    
+    // Scroll final
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
     await new Promise(r => setTimeout(r, 3000));
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await new Promise(r => setTimeout(r, 2000));
+
+    // REMOVER atributos e estilos adicionados antes de capturar HTML
+    console.log('[AUTO-CLONE] Removendo atributos temporários...');
+    await page.evaluate(() => {
+      document.querySelectorAll('[data-original-display]').forEach(el => {
+        const originalDisplay = el.getAttribute('data-original-display');
+        const originalVisibility = el.getAttribute('data-original-visibility');
+        const originalOpacity = el.getAttribute('data-original-opacity');
+        
+        // Restaurar valores originais
+        if (originalDisplay) {
+          el.style.display = originalDisplay;
+        } else {
+          el.style.removeProperty('display');
+        }
+        
+        if (originalVisibility) {
+          el.style.visibility = originalVisibility;
+        } else {
+          el.style.removeProperty('visibility');
+        }
+        
+        if (originalOpacity) {
+          el.style.opacity = originalOpacity;
+        } else {
+          el.style.removeProperty('opacity');
+        }
+        
+        // Remover atributos temporários
+        el.removeAttribute('data-original-display');
+        el.removeAttribute('data-original-visibility');
+        el.removeAttribute('data-original-opacity');
+      });
+    });
+
+    console.log('[AUTO-CLONE] ✅ Todas as etapas concluídas! Capturando HTML...');
 
     const html = await page.content();
     const title = await page.title();
