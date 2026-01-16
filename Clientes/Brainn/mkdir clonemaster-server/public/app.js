@@ -8,6 +8,12 @@ const errorContainer = document.getElementById('error');
 const downloadBtn = document.getElementById('downloadBtn');
 const resultMessage = document.getElementById('resultMessage');
 const errorMessage = document.getElementById('errorMessage');
+const previewContainer = document.getElementById('preview');
+const previewIframe = document.getElementById('previewIframe');
+const previewCloseBtn = document.getElementById('previewCloseBtn');
+const previewDownloadBtn = document.getElementById('previewDownloadBtn');
+const previewBtn = document.getElementById('previewBtn');
+const previewInfo = document.getElementById('previewInfo');
 
 form.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -119,6 +125,7 @@ function hideAll() {
     progressContainer.style.display = 'none';
     resultContainer.style.display = 'none';
     errorContainer.style.display = 'none';
+    if (previewContainer) previewContainer.style.display = 'none';
 }
 
 function formatBytes(bytes) {
@@ -127,4 +134,130 @@ function formatBytes(bytes) {
     const sizes = ['Bytes', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+}
+
+// Função para fazer preview
+async function showPreview(url) {
+    hideAll();
+    showProgress();
+    setProgress(10, 'Gerando preview...');
+    
+    submitBtn.disabled = true;
+    if (previewBtn) previewBtn.disabled = true;
+    
+    try {
+        setProgress(30, 'Renderizando site...');
+        
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutos para preview
+        
+        const response = await fetch('/api/preview', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ url }),
+            signal: controller.signal
+        });
+        
+        clearTimeout(timeoutId);
+        
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ error: 'Erro desconhecido' }));
+            throw new Error(errorData.error || `Erro ${response.status}`);
+        }
+        
+        const data = await response.json();
+        
+        setProgress(100, 'Preview pronto!');
+        
+        setTimeout(() => {
+            displayPreview(data, url);
+        }, 500);
+        
+    } catch (error) {
+        let errorMsg = 'Erro ao gerar preview';
+        if (error.name === 'AbortError') {
+            errorMsg = '⏱️ Tempo de espera esgotado. Tente novamente.';
+        } else if (error.message === 'Failed to fetch' || error.message.includes('fetch')) {
+            errorMsg = '❌ Não foi possível conectar ao servidor. Verifique se o servidor está rodando em http://localhost:3000';
+        } else if (error.message) {
+            errorMsg = error.message;
+        }
+        showError(errorMsg);
+    } finally {
+        submitBtn.disabled = false;
+        if (previewBtn) previewBtn.disabled = false;
+    }
+}
+
+// Função para exibir preview
+function displayPreview(data, originalUrl) {
+    hideAll();
+    if (!previewContainer) return;
+    
+    previewContainer.style.display = 'block';
+    
+    // Criar blob URL do HTML
+    const blob = new Blob([data.html], { type: 'text/html' });
+    const blobUrl = URL.createObjectURL(blob);
+    previewIframe.src = blobUrl;
+    
+    // Salvar URL original para download posterior
+    if (previewDownloadBtn) {
+        previewDownloadBtn.dataset.url = originalUrl;
+    }
+    
+    // Estatísticas
+    const statsInfo = `
+        <div style="padding: 15px; background: #f5f5f5; border-radius: 8px; margin: 15px 0; border-left: 4px solid #4CAF50;">
+            <strong>📊 Preview do site:</strong> <strong>${data.title || 'Sem título'}</strong><br>
+            🖼️ Imagens encontradas: <strong>${data.stats?.images || 0}</strong> | 
+            📝 Texto: <strong>${data.stats?.textLength || 0}</strong> caracteres | 
+            📏 Altura: <strong>${Math.round((data.stats?.scrollHeight || 0) / 100)}</strong>px
+        </div>
+    `;
+    
+    if (previewInfo) {
+        previewInfo.innerHTML = statsInfo;
+    }
+}
+
+// Event listeners para preview
+if (previewBtn) {
+    previewBtn.addEventListener('click', async () => {
+        const url = document.getElementById('url').value;
+        if (url) {
+            await showPreview(url);
+        } else {
+            showError('Por favor, insira uma URL válida');
+        }
+    });
+}
+
+if (previewCloseBtn) {
+    previewCloseBtn.addEventListener('click', () => {
+        if (previewContainer) previewContainer.style.display = 'none';
+        if (previewIframe && previewIframe.src.startsWith('blob:')) {
+            URL.revokeObjectURL(previewIframe.src);
+        }
+        if (previewIframe) previewIframe.src = '';
+    });
+}
+
+if (previewDownloadBtn) {
+    previewDownloadBtn.addEventListener('click', async () => {
+        const url = previewDownloadBtn.dataset.url;
+        if (url) {
+            if (previewContainer) previewContainer.style.display = 'none';
+            // Limpar preview
+            if (previewIframe && previewIframe.src.startsWith('blob:')) {
+                URL.revokeObjectURL(previewIframe.src);
+            }
+            if (previewIframe) previewIframe.src = '';
+            // Chamar função de clone completo
+            document.getElementById('url').value = url;
+            form.dispatchEvent(new Event('submit'));
+        }
+    });
 }

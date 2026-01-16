@@ -1209,6 +1209,135 @@ app.post('/api/analyze', async (req, res) => {
   }
 });
 
+// --- ENDPOINT DE PREVIEW ---
+
+app.post('/api/preview', async (req, res) => {
+  const { url } = req.body;
+  if (!url) return res.status(400).json({ error: 'URL required' });
+
+  console.log(`[PREVIEW] Gerando preview de: ${url}`);
+  let browser = null;
+
+  try {
+    const userAgent = new UserAgent({ deviceCategory: 'desktop' });
+    browser = await puppeteer.launch({
+      headless: "new",
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--disable-gpu',
+        '--window-size=1920,1080'
+      ]
+    });
+
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1920, height: 1080 });
+    await page.setUserAgent(userAgent.toString());
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+      'Upgrade-Insecure-Requests': '1'
+    });
+
+    await robustNavigate(page, url);
+
+    // Etapas simplificadas para preview (mais rápido)
+    console.log('[PREVIEW] Aguardando React/Framer carregar...');
+    await new Promise(r => setTimeout(r, 5000));
+
+    // Verificar se React carregou
+    const reactLoaded = await page.evaluate(() => {
+      return typeof window.React !== 'undefined' || 
+             document.querySelector('[data-reactroot]') !== null ||
+             document.querySelector('*[class*="framer"]') !== null;
+    });
+
+    if (!reactLoaded) {
+      console.warn('[PREVIEW] ⚠️ React pode não ter carregado, aguardando mais...');
+      await new Promise(r => setTimeout(r, 3000));
+    }
+
+    // Aguardar renderização inicial
+    try {
+      await page.waitForFunction(() => {
+        const body = document.body;
+        if (!body) return false;
+        const hasContent = body.innerText.trim().length > 100;
+        const hasImages = document.querySelectorAll('img').length > 0;
+        const hasVisibleElements = Array.from(body.querySelectorAll('*')).some(el => {
+          const style = window.getComputedStyle(el);
+          return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+        });
+        return hasContent || hasImages || hasVisibleElements;
+      }, { timeout: 10000 });
+    } catch (e) {
+      console.warn('[PREVIEW] Timeout aguardando renderização, continuando...');
+    }
+
+    // Scroll e forçar imagens
+    await smartScroll(page);
+    
+    // Forçar carregamento de imagens
+    await page.evaluate(() => {
+      document.querySelectorAll('img').forEach(img => {
+        if (img.dataset.src && !img.src) {
+          img.src = img.dataset.src;
+          img.removeAttribute('data-src');
+        }
+        if (img.loading === 'lazy') {
+          img.loading = 'eager';
+          img.removeAttribute('loading');
+        }
+        if (img.dataset.lazySrc) {
+          img.src = img.dataset.lazySrc;
+        }
+      });
+    });
+
+    await new Promise(r => setTimeout(r, 3000));
+
+    // Scroll final
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    await new Promise(r => setTimeout(r, 2000));
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await new Promise(r => setTimeout(r, 1000));
+
+    // Capturar HTML renderizado
+    const html = await page.content();
+    const title = await page.title();
+    
+    // Estatísticas básicas
+    const stats = await page.evaluate(() => {
+      return {
+        images: document.querySelectorAll('img').length,
+        textLength: document.body.innerText.trim().length,
+        hasContent: document.body.scrollHeight > 500,
+        scrollHeight: document.body.scrollHeight
+      };
+    });
+
+    console.log(`[PREVIEW] Preview gerado: ${title}`);
+    
+    res.json({ 
+      success: true, 
+      html: html,
+      title: title,
+      stats: stats,
+      preview: true
+    });
+
+  } catch (error) {
+    console.error('[PREVIEW] Erro:', error.message);
+    res.status(500).json({ error: error.message });
+  } finally {
+    if (browser) await browser.close();
+  }
+});
+
 // --- ENDPOINT AUTOMÁTICO COM ZIP ---
 
 app.post('/api/clone-and-zip', async (req, res) => {
